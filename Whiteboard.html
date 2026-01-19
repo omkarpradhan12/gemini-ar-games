@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gesture & Marker Whiteboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background: #111; font-family: 'Segoe UI', sans-serif; }
+
+        /* The Canvas is the drawing layer */
+        #output_canvas {
+            position: absolute;
+            top: 0; left: 0;
+            z-index: 5;
+            background: transparent;
+        }
+
+        /* The Video is mirrored and acts as the background */
+        #input_video {
+            position: absolute;
+            width: 100vw; height: 100vh;
+            object-fit: cover;
+            transform: scaleX(-1);
+            opacity: 0.5;
+            z-index: 1;
+        }
+
+        .ui-panel {
+            position: absolute; top: 20px; left: 20px;
+            background: rgba(255, 255, 255, 0.95);
+            padding: 20px; border-radius: 15px;
+            z-index: 10; width: 220px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+        }
+
+        .gesture-indicator {
+            display: inline-block;
+            width: 12px; height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+
+        .active-draw { background: #2ecc71; }
+        .active-erase { background: #e74c3c; }
+
+        select, button {
+            width: 100%; padding: 12px; margin-top: 10px;
+            border-radius: 8px; border: 1px solid #ddd;
+            cursor: pointer; font-weight: 600;
+        }
+        button { background: #3498db; color: white; border: none; }
+        button:hover { background: #2980b9; }
+    </style>
+</head>
+<body>
+
+    <div class="ui-panel">
+        <h2 style="margin:0 0 10px 0; font-size: 18px;">Air Board</h2>
+        <div id="status_text" style="font-size: 14px; margin-bottom: 10px;">
+            <span class="gesture-indicator" id="indicator"></span>
+            <span id="mode_label">Moving...</span>
+        </div>
+        <p style="font-size: 12px; color: #666;">
+            🤏 <b>Pinch</b> to Draw<br>
+            ✋ <b>Open Palm</b> to Erase
+        </p>
+        <select id="camera_select"></select>
+        <button onclick="clearCanvas()">Clear All</button>
+    </div>
+
+    <video id="input_video" autoplay playsinline></video>
+    <canvas id="output_canvas"></canvas>
+
+    <script>
+        const videoElement = document.getElementById('input_video');
+        const canvasElement = document.getElementById('output_canvas');
+        const cameraSelect = document.getElementById('camera_select');
+        const modeLabel = document.getElementById('mode_label');
+        const indicator = document.getElementById('indicator');
+        const ctx = canvasElement.getContext('2d');
+
+        function resize() {
+            canvasElement.width = window.innerWidth;
+            canvasElement.height = window.innerHeight;
+        }
+        window.onresize = resize;
+        resize();
+
+        let lastX = 0, lastY = 0, isDrawing = false;
+        let activeCamera = null;
+
+        // Smoothing variables to prevent "wonky" jitter
+        let smoothX = 0, smoothY = 0;
+        const smoothing = 0.5;
+
+        function onResults(results) {
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const landmarks = results.multiHandLandmarks[0];
+
+                // Track the tip of the Index Finger (Landmark 8)
+                const index = landmarks[8];
+                const thumb = landmarks[4];
+                const middle = landmarks[12];
+
+                // Convert to Screen Coordinates (Mirrored)
+                const targetX = (1 - index.x) * canvasElement.width;
+                const targetY = index.y * canvasElement.height;
+
+                // Apply Smoothing
+                smoothX = smoothX + (targetX - smoothX) * smoothing;
+                smoothY = smoothY + (targetY - smoothY) * smoothing;
+
+                // 1. PINCH TO DRAW LOGIC
+                const distPinch = Math.sqrt(Math.pow(index.x - thumb.x, 2) + Math.pow(index.y - thumb.y, 2));
+                const isPinching = distPinch < 0.05;
+
+                // 2. PALM TO ERASE LOGIC (Checking if index and middle are upright)
+                const isPalm = (index.y < landmarks[6].y && middle.y < landmarks[10].y && landmarks[16].y < landmarks[14].y);
+
+                if (isPalm) {
+                    updateStatus("Eraser", "active-erase");
+                    erase(smoothX, smoothY);
+                    isDrawing = false;
+                } else if (isPinching) {
+                    updateStatus("Drawing", "active-draw");
+                    if (!isDrawing) {
+                        isDrawing = true;
+                        lastX = smoothX;
+                        lastY = smoothY;
+                    }
+                    draw(smoothX, smoothY);
+                } else {
+                    updateStatus("Moving", "");
+                    isDrawing = false;
+                }
+            }
+        }
+
+        function updateStatus(label, className) {
+            modeLabel.innerText = label;
+            indicator.className = 'gesture-indicator ' + className;
+        }
+
+        function draw(x, y) {
+            ctx.globalCompositeOperation = 'source-over';
+            ctx.beginPath();
+            ctx.lineWidth = 6;
+            ctx.lineCap = 'round';
+            ctx.strokeStyle = '#000000';
+            ctx.moveTo(lastX, lastY);
+            ctx.lineTo(x, y);
+            ctx.stroke();
+            lastX = x;
+            lastY = y;
+        }
+
+        function erase(x, y) {
+            ctx.globalCompositeOperation = 'destination-out';
+            ctx.beginPath();
+            ctx.arc(x, y, 50, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        function clearCanvas() {
+            ctx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+        }
+
+        const hands = new Hands({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}` });
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.75,
+            minTrackingConfidence: 0.75
+        });
+        hands.onResults(onResults);
+
+        async function initCamera() {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const videoDevices = devices.filter(d => d.kind === 'videoinput');
+
+            videoDevices.forEach((d, i) => {
+                const opt = document.createElement('option');
+                opt.value = d.deviceId;
+                opt.text = d.label || `Camera ${i+1}`;
+                cameraSelect.appendChild(opt);
+            });
+
+            const start = () => {
+                if(activeCamera) activeCamera.stop();
+                activeCamera = new Camera(videoElement, {
+                    onFrame: async () => await hands.send({image: videoElement}),
+                    width: 1280, height: 720
+                });
+                activeCamera.start();
+            };
+
+            cameraSelect.onchange = start;
+            start();
+        }
+
+        initCamera();
+    </script>
+</body>
+</html>

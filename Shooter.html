@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>3D Bullseye - Accuracy Stats</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Segoe UI', sans-serif; }
+        canvas { display: block; }
+        #video_container { position: absolute; bottom: 20px; right: 20px; width: 180px; border: 2px solid #00d2d3; border-radius: 10px; overflow: hidden; z-index: 50; transform: scaleX(-1); opacity: 0.8; }
+        #input_video { width: 100%; height: auto; display: block; }
+
+        /* Screen Styles */
+        .ui-screen { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(5, 10, 20, 0.95); color: white; padding: 40px; border-radius: 20px; z-index: 200; text-align: center; border: 2px solid #00d2d3; min-width: 350px; box-shadow: 0 0 50px rgba(0, 210, 211, 0.2); }
+        .overlay { position: absolute; top: 20px; left: 20px; color: white; z-index: 100; background: rgba(0,0,0,0.8); padding: 20px; border-radius: 10px; border-left: 5px solid #00d2d3; pointer-events: none; }
+
+        button { padding: 15px 30px; background: #00d2d3; border: none; font-weight: bold; cursor: pointer; color: #000; margin-top: 20px; border-radius: 5px; text-transform: uppercase; }
+
+        #timer-bar { width: 100%; height: 10px; background: #333; margin-top: 10px; border-radius: 5px; overflow: hidden; }
+        #timer-fill { width: 100%; height: 100%; background: #00d2d3; transition: width 0.1s linear; }
+
+        /* Result Item Styles */
+        .result-item { background: rgba(255,255,255,0.05); margin: 10px 0; padding: 15px; border-radius: 10px; border-left: 4px solid #444; text-align: left; }
+        .winner { border-left-color: #f9ca24; background: rgba(249, 202, 36, 0.1); }
+        .accuracy-high { color: #2ecc71; font-weight: bold; }
+    </style>
+</head>
+<body onclick="initAudio()">
+
+    <div id="setup-screen" class="ui-screen">
+        <h1 style="color: #00d2d3;">BULLSEYE 3D</h1>
+        <p>✋ Palm to Aim | ✊ Fist to Fire</p>
+        <p>Players: <input type="number" id="playerCount" value="1" min="1" max="4" style="width:50px; padding:5px; text-align:center;"></p>
+        <button onclick="startGame()">Start Battle</button>
+    </div>
+
+    <div id="switch-screen" class="ui-screen" style="display:none;">
+        <h2 style="color: #f9ca24;">ROUND ENDED</h2>
+        <p id="switch-msg" style="font-size: 20px;"></p>
+        <p>Show ✋ (Open Palm) to start next turn!</p>
+        <button onclick="resumeGame()">Resume</button>
+    </div>
+
+    <div id="game-over-screen" class="ui-screen" style="display:none;">
+        <h1 style="color: #00d2d3; margin-top:0;">BATTLE REPORT</h1>
+        <div id="final-results"></div>
+        <button onclick="location.reload()">New Match</button>
+    </div>
+
+    <div class="overlay" id="game-ui" style="display:none;">
+        <div id="current-info" style="font-size: 24px; color: #00d2d3; font-weight: bold;">PLAYER 1</div>
+        <div>Shots: <span id="shots-left">5</span>/5</div>
+        <div id="timer-bar"><div id="timer-fill"></div></div>
+    </div>
+
+    <div id="video_container"><video id="input_video" autoplay playsinline></video></div>
+
+    <script>
+        let scene, camera, renderer, targets = [], crosshair, stars;
+        let players = [], currentPlayerIdx = 0, shotsThisTurn = 0;
+        let pointerPos = { x: window.innerWidth/2, y: window.innerHeight/2, canFire: true };
+        let activeIdx = 0, timerVal = 100, timerInt, isPaused = false;
+
+        window.addEventListener('resize', () => {
+            if (!renderer) return;
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        function startGame() {
+            const count = parseInt(document.getElementById('playerCount').value);
+            for(let i=0; i<count; i++) players.push({ id: i+1, score: 0, shots: 0, hits: 0 });
+            document.getElementById('setup-screen').style.display = 'none';
+            document.getElementById('game-ui').style.display = 'block';
+            init3D();
+            spawnTargets();
+            updateUI();
+        }
+
+        function init3D() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            const starGeo = new THREE.BufferGeometry();
+            const starCoords = [];
+            for(let i=0; i<800; i++) starCoords.push((Math.random()-0.5)*100, (Math.random()-0.5)*100, -15);
+            starGeo.setAttribute('position', new THREE.Float32BufferAttribute(starCoords, 3));
+            stars = new THREE.Points(starGeo, new THREE.PointsMaterial({color: 0xaaaaaa, size: 0.1}));
+            scene.add(stars);
+
+            scene.add(new THREE.AmbientLight(0xffffff, 1.0));
+            crosshair = new THREE.Mesh(new THREE.TorusGeometry(0.15, 0.02, 16, 100), new THREE.MeshBasicMaterial({ color: 0x00d2d3 }));
+            scene.add(crosshair);
+            camera.position.z = 8;
+            animate();
+        }
+
+        function spawnTargets() {
+            targets.forEach(t => scene.remove(t));
+            targets = [];
+            const layouts = [{x: -4, y: 2.5}, {x: 4, y: 2.5}, {x: 0, y: 0}, {x: -4, y: -2.5}, {x: 4, y: -2.5}];
+            layouts.forEach((pos) => {
+                const group = new THREE.Group();
+                for(let j=0; j<3; j++) {
+                    const ring = new THREE.Mesh(new THREE.CircleGeometry(1.2 - (j*0.4), 32), new THREE.MeshStandardMaterial({ color: 0x222222, emissive: 0x000000 }));
+                    ring.position.z = j * 0.1;
+                    group.add(ring);
+                }
+                group.position.set(pos.x, pos.y, -2);
+                targets.push(group);
+                scene.add(group);
+            });
+            nextTarget();
+        }
+
+        function nextTarget() {
+            if(isPaused) return;
+            targets.forEach(t => t.children.forEach(c => { c.material.color.set(0x222222); c.material.emissive.set(0x000000); }));
+            activeIdx = Math.floor(Math.random() * 5);
+            const colors = [0xff0000, 0xffffff, 0xffff00];
+            targets[activeIdx].children.forEach((c, idx) => {
+                c.material.color.set(colors[idx]);
+                c.material.emissive.set(colors[idx]);
+                c.material.emissiveIntensity = 0.5;
+            });
+            timerVal = 100;
+            clearInterval(timerInt);
+            timerInt = setInterval(() => {
+                if(!isPaused) {
+                    timerVal -= 2.5;
+                    document.getElementById('timer-fill').style.width = timerVal + "%";
+                    if(timerVal <= 0) handleShot(true);
+                }
+            }, 100);
+        }
+
+        function handleShot(timeout = false) {
+            if(isPaused) return;
+            let p = players[currentPlayerIdx];
+            p.shots++; shotsThisTurn++;
+            if(!timeout) {
+                const raycaster = new THREE.Raycaster();
+                const mouse = new THREE.Vector2((pointerPos.x/window.innerWidth)*2-1, -(pointerPos.y/window.innerHeight)*2+1);
+                raycaster.setFromCamera(mouse, camera);
+                const hit = raycaster.intersectObjects(targets[activeIdx].children);
+                if(hit.length > 0) { p.score += 100; p.hits++; }
+            }
+            if(shotsThisTurn >= 5) {
+                if(currentPlayerIdx === players.length - 1) endGame();
+                else showSwitchPopup();
+                return;
+            }
+            updateUI();
+            nextTarget();
+        }
+
+        function showSwitchPopup() {
+            isPaused = true;
+            clearInterval(timerInt);
+            currentPlayerIdx++;
+            shotsThisTurn = 0;
+            document.getElementById('switch-msg').innerText = `NEXT: PLAYER ${players[currentPlayerIdx].id}`;
+            document.getElementById('switch-screen').style.display = 'block';
+        }
+
+        function resumeGame() {
+            if(!isPaused) return;
+            isPaused = false;
+            document.getElementById('switch-screen').style.display = 'none';
+            updateUI();
+            nextTarget();
+        }
+
+        function endGame() {
+            isPaused = true;
+            clearInterval(timerInt);
+            document.getElementById('game-ui').style.display = 'none';
+            document.getElementById('game-over-screen').style.display = 'block';
+
+            const sorted = [...players].sort((a,b) => b.score - a.score);
+            let resHtml = "";
+
+            sorted.forEach((p, index) => {
+                const accuracy = p.shots > 0 ? Math.round((p.hits / p.shots) * 100) : 0;
+                const isWinner = index === 0;
+                const accClass = accuracy >= 80 ? "accuracy-high" : "";
+
+                resHtml += `
+                    <div class="result-item ${isWinner ? 'winner' : ''}">
+                        <strong>${isWinner ? '🏆 ' : ''}PLAYER ${p.id}</strong><br>
+                        Score: ${p.score} | Accuracy: <span class="${accClass}">${accuracy}%</span>
+                        <div style="font-size: 12px; color: #888;">Hits: ${p.hits} / Total Shots: ${p.shots}</div>
+                    </div>
+                `;
+            });
+
+            document.getElementById('final-results').innerHTML = resHtml;
+        }
+
+            function updateUI() {
+            document.getElementById('current-info').innerText = `PLAYER ${players[currentPlayerIdx].id}`;
+            document.getElementById('shots-left').innerText = 5 - shotsThisTurn;
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            if(stars) stars.rotation.z += 0.0005;
+            const vec = new THREE.Vector3((pointerPos.x/window.innerWidth)*2-1, -(pointerPos.y/window.innerHeight)*2+1, 0.5).unproject(camera);
+            const dir = vec.sub(camera.position).normalize();
+            crosshair.position.copy(camera.position.clone().add(dir.multiplyScalar(7)));
+            renderer.render(scene, camera);
+        }
+
+        function onResults(results) {
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const hand = results.multiHandLandmarks[0];
+                pointerPos.x = (1 - hand[9].x) * window.innerWidth;
+                pointerPos.y = hand[9].y * window.innerHeight;
+
+                const isFist = [8,12,16,20].every(i => hand[i].y > hand[i-2].y);
+                const isPalm = [8,12,16,20].every(i => hand[i].y < hand[i-2].y);
+
+                if (isFist && pointerPos.canFire && !isPaused) {
+                    handleShot(); pointerPos.canFire = false;
+                    crosshair.material.color.set(0xffffff);
+                } else if (isPalm) {
+                    pointerPos.canFire = true;
+                    crosshair.material.color.set(0x00d2d3);
+                    if(isPaused) resumeGame();
+                }
+            }
+        }
+
+        const hands = new Hands({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+        hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+        hands.onResults(onResults);
+        new Camera(document.getElementById('input_video'), { onFrame: async () => { await hands.send({image: document.getElementById('input_video')}); }, width: 640, height: 480 }).start();
+
+        let audioCtx;
+        function initAudio() { if(!audioCtx) audioCtx = new AudioContext(); }
+    </script>
+</body>
+</html>
