@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>AI Pro Drummer v2.0</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #050505; font-family: 'Segoe UI', sans-serif; }
+        #ui { position: absolute; top: 20px; left: 20px; z-index: 100; pointer-events: none; }
+        .panel { background: rgba(15,15,15,0.9); color: #00ffcc; padding: 20px; border-radius: 12px; border: 1px solid #00ffcc; box-shadow: 0 0 20px rgba(0,255,204,0.3); }
+        #msg { font-size: 1.1em; font-weight: bold; text-transform: uppercase; letter-spacing: 2px; }
+        #video-preview {
+            position: absolute; bottom: 20px; right: 20px; width: 220px; height: 130px;
+            border: 2px solid #00ffcc; border-radius: 8px; overflow: hidden; transform: scaleX(-1);
+        }
+        #input_video { width: 100%; height: 100%; object-fit: cover; }
+    </style>
+</head>
+<body>
+
+    <div id="ui">
+        <div class="panel">
+            <div id="msg">Tap Screen to Load Pro Audio</div>
+            <p style="font-size: 0.75em; color: #888; margin-top: 5px;">6-Piece Kit Active | Sampler Mode</p>
+        </div>
+    </div>
+
+    <div id="video-preview">
+        <video id="input_video" playsinline></video>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+    <script>
+        const videoElement = document.getElementById('input_video');
+        const msg = document.getElementById('msg');
+        let audioStarted = false;
+
+        // --- 1. Pro Audio Setup (Sampler + Effects) ---
+        const reverb = new Tone.Reverb({ decay: 1.5, wet: 0.3 }).toDestination();
+
+        // Using high-quality open-source drum samples
+        const drumKit = new Tone.Sampler({
+            urls: {
+                A1: "https://tonejs.github.io/audio/drum-samples/CR78/kick.mp3",
+                A2: "https://tonejs.github.io/audio/drum-samples/CR78/snare.mp3",
+                A3: "https://tonejs.github.io/audio/drum-samples/CR78/hihat.mp3",
+                A4: "https://tonejs.github.io/audio/drum-samples/CR78/tom1.mp3",
+                A5: "https://tonejs.github.io/audio/drum-samples/CR78/tom2.mp3",
+                A6: "https://tonejs.github.io/audio/drum-samples/CR78/claps.mp3"
+            },
+            onload: () => { msg.innerText = "READY TO ROCK!"; }
+        }).connect(reverb);
+
+        window.onclick = () => { if(!audioStarted){ Tone.start(); audioStarted = true; msg.innerText = "KIT LOADED"; }};
+
+        // --- 2. Three.js Scene ---
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 1.5, 5);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+        const pLight = new THREE.PointLight(0x00ffcc, 1, 100);
+        pLight.position.set(0, 5, 5);
+        scene.add(pLight);
+        scene.add(new THREE.GridHelper(20, 20, 0x00ffcc, 0x111111));
+
+        // --- 3. Drum Creation ---
+        const drums = [];
+        function createDrum(x, y, z, color, note, label) {
+            const group = new THREE.Group();
+
+            // Shell
+            const shellGeo = new THREE.CylinderGeometry(0.5, 0.5, 0.4, 32);
+            const shellMat = new THREE.MeshStandardMaterial({ color: color, metalness: 0.7, roughness: 0.2 });
+            const shell = new THREE.Mesh(shellGeo, shellMat);
+
+            // Head (Skin)
+            const headGeo = new THREE.CylinderGeometry(0.51, 0.51, 0.05, 32);
+            const headMat = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 0 });
+            const head = new THREE.Mesh(headGeo, headMat);
+            head.position.y = 0.2;
+
+            group.add(shell, head);
+            group.position.set(x, y, z);
+            scene.add(group);
+
+            drums.push({ mesh: head, shell: shell, note: note, cooldown: false, originalColor: color });
+        }
+
+        // Layout the kit
+        createDrum(-2.5, 1.2, 1.5, 0xcccc00, "A3", "HIHAT");   // Hi-Hat
+        createDrum(-1.3, 0.5, 2.0, 0x0055ff, "A4", "FLOOR");   // Floor Tom
+        createDrum(0, 0, 2.5, 0xff3300, "A1", "KICK");        // Kick (Center)
+        createDrum(0.8, 1.0, 1.8, 0x00ffaa, "A5", "MID");      // Mid Tom
+        createDrum(1.8, 0.6, 2.2, 0xff0066, "A2", "SNARE");    // Snare
+        createDrum(2.8, 1.8, 1.0, 0xffaa00, "A6", "CRASH");    // Crash/Clap
+
+        // Sticks (Fingertips)
+        const stickMat = new THREE.MeshBasicMaterial({ color: 0x00ffcc });
+        const leftStick = new THREE.Mesh(new THREE.SphereGeometry(0.12), stickMat);
+        const rightStick = new THREE.Mesh(new THREE.SphereGeometry(0.12), stickMat);
+        scene.add(leftStick, rightStick);
+
+        // --- 4. Logic ---
+        function onResults(results) {
+            if (!results.multiHandLandmarks) return;
+
+            results.multiHandLandmarks.forEach((landmarks, index) => {
+                const label = results.multiHandedness[index].label;
+                const tip = landmarks[8];
+                const posX = (tip.x - 0.5) * -10;
+                const posY = (tip.y - 0.5) * -6;
+                const posZ = 2;
+
+                const marker = label === 'Left' ? rightStick : leftStick;
+                marker.position.set(posX, posY, posZ);
+
+                drums.forEach(drum => {
+                    const dist = marker.position.distanceTo(drum.mesh.getWorldPosition(new THREE.Vector3()));
+
+                    if (dist < 0.6 && !drum.cooldown) {
+                        if (audioStarted) drumKit.triggerAttack(drum.note);
+
+                        // Hit Animation
+                        drum.mesh.material.emissiveIntensity = 4;
+                        drum.shell.scale.set(1.1, 0.9, 1.1);
+
+                        drum.cooldown = true;
+                        setTimeout(() => {
+                            drum.cooldown = false;
+                            drum.mesh.material.emissiveIntensity = 0;
+                            drum.shell.scale.set(1, 1, 1);
+                        }, 120);
+                    }
+                });
+            });
+        }
+
+        const hands = new Hands({locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`});
+        hands.setOptions({maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.7, minTrackingConfidence: 0.7});
+        hands.onResults(onResults);
+
+        const cam = new Camera(videoElement, {
+            onFrame: async () => await hands.send({image: videoElement}),
+            width: 1280, height: 720
+        });
+        cam.start();
+
+        function animate() {
+            requestAnimationFrame(animate);
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        window.onresize = () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        };
+    </script>
+</body>
+</html>
